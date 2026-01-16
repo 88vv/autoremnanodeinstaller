@@ -127,7 +127,7 @@ info "Готовлю каталоги..."
 $SUDO mkdir -p /opt/remnanode
 $SUDO mkdir -p /var/log/remnanode
 
-info "Создаю файлы логов (чтобы сторонние скрипты не спрашивали про создание)..."
+info "Создаю файлы логов..."
 $SUDO touch /var/log/remnanode/access.log
 $SUDO touch /var/log/remnanode/error.log
 $SUDO chmod 0644 /var/log/remnanode/access.log /var/log/remnanode/error.log || true
@@ -242,67 +242,37 @@ cd /opt/remnanode
 $SUDO docker compose up -d
 
 print_line ""
-warn "Покажу логи docker compose 15 секунд (дальше продолжу установку)..."
+warn "Покажу логи docker compose 15 секунд (дальше продолжу)..."
 if need_cmd timeout; then
   $SUDO timeout 15s docker compose logs -f -t || true
 else
   $SUDO docker compose logs -t --tail 120 || true
 fi
 
-info "Ставлю xray-torrent-blocker..."
-cd /opt
-if [[ -d /opt/xray-torrent-blocker ]]; then
-  warn "/opt/xray-torrent-blocker уже существует - пропускаю clone."
-else
-  $SUDO git clone https://github.com/kutovoys/xray-torrent-blocker.git
-fi
-
-cd /opt/xray-torrent-blocker
-
-info "Ставлю зависимости (без вопросов apt)..."
+info "Ставлю tblocker (xray torrent blocker) через apt-репозиторий (без интерактива)..."
 $SUDO apt update -y
-$SUDO apt install -y curl iptables jq git expect conntrack
+$SUDO apt install -y curl gnupg conntrack iptables jq
 
-info "Запускаю install.sh и автоматически отвечаю на вопросы..."
-$SUDO expect <<'EXPECT'
-set timeout -1
-log_user 1
+$SUDO curl -fsSL https://repo.remna.dev/xray-tools/public.gpg | $SUDO gpg --yes --dearmor -o /usr/share/keyrings/openrepo-xray-tools.gpg
+$SUDO bash -c 'echo "deb [arch=any signed-by=/usr/share/keyrings/openrepo-xray-tools.gpg] https://repo.remna.dev/xray-tools/ stable main" > /etc/apt/sources.list.d/openrepo-xray-tools.list'
+$SUDO apt update -y
+$SUDO apt install -y tblocker
 
-proc answer {pattern value} {
-  expect {
-    -re $pattern { send -- "$value\r" }
-    timeout { return }
-  }
-}
+info "Настраиваю /opt/tblocker/config.yaml"
+$SUDO mkdir -p /opt/tblocker
+$SUDO tee /opt/tblocker/config.yaml >/dev/null <<'EOF'
+LogFile: "/var/log/remnanode/access.log"
+BlockDuration: 10
+TorrentTag: "TORRENT"
+BlockMode: "iptables"
+SendWebhook: false
+EOF
 
-spawn env DEBIAN_FRONTEND=noninteractive bash install.sh
-
-# Путь к логу
-answer {(?i)enter.*path.*log|log.*file.*monitor|укаж.*путь.*лог|путь.*лог} "/var/log/remnanode/access.log"
-
-# Если вдруг спросит про создание файла
-answer {(?i)does not exist.*create.*\?\s*\(y\/n\)|do you want to create it.*\?\s*\(y\/n\)|создат.*\?\s*\(y\/n\)} "y"
-
-# Выбор firewall: "Select firewall (1-2):"
-answer {(?i)select.*firewall.*\(1-2\)|select.*firewall|firewalls:.*1\).*iptables.*2\).*nft} "1"
-
-# Если apt вдруг спросит подтверждение (Y/n)
-while {1} {
-  expect {
-    -re {(?i)do you want to continue\?\s*\[y\/n\]} { send -- "Y\r"; exp_continue }
-    -re {(?i)\(y\/n\)|\[y\/n\]} { send -- "Y\r"; exp_continue }
-    eof { break }
-    timeout { exp_continue }
-  }
-}
-
-EXPECT
-
-info "Включаю и запускаю tblocker..."
+info "Запускаю tblocker..."
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable tblocker
-$SUDO systemctl start tblocker
+$SUDO systemctl restart tblocker
 
 ok "Все успешно."
 warn "Логи tblocker (Ctrl+C чтобы выйти):"
-$SUDO journalctl -u tblocker -f
+$SUDO journalctl -u tblocker -f --no-pager
