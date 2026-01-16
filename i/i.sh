@@ -1,29 +1,100 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if ! command -v sudo >/dev/null 2>&1; then
-  echo "Ошибка: sudo не найден. Установите sudo или запускайте скрипт от root."
+USE_COLOR=0
+if [[ -t 1 ]]; then
+  USE_COLOR=1
+fi
+
+c_reset=$'\033[0m'
+c_red=$'\033[31m'
+c_green=$'\033[32m'
+c_yellow=$'\033[33m'
+c_blue=$'\033[34m'
+c_cyan=$'\033[36m'
+c_bold=$'\033[1m'
+
+print_line() {
+  printf '%s\n' "$*"
+}
+
+info() {
+  if [[ $USE_COLOR -eq 1 ]]; then
+    print_line "${c_cyan}${c_bold}[*]${c_reset} $*"
+  else
+    print_line "[*] $*"
+  fi
+}
+
+ok() {
+  if [[ $USE_COLOR -eq 1 ]]; then
+    print_line "${c_green}${c_bold}[+]${c_reset} $*"
+  else
+    print_line "[+] $*"
+  fi
+}
+
+warn() {
+  if [[ $USE_COLOR -eq 1 ]]; then
+    print_line "${c_yellow}${c_bold}[!]${c_reset} $*"
+  else
+    print_line "[!] $*"
+  fi
+}
+
+err() {
+  if [[ $USE_COLOR -eq 1 ]]; then
+    print_line "${c_red}${c_bold}[x]${c_reset} $*"
+  else
+    print_line "[x] $*"
+  fi
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+if ! need_cmd sudo; then
+  err "sudo не найден. Установи sudo или запускай от root."
   exit 1
 fi
 
-echo "Remnawave node installer"
-echo "------------------------"
-echo "Сейчас вы вставите содержимое docker-compose.yml."
-echo "Завершите ввод одной строкой: __EOF__"
-echo
+if [[ "$(id -u)" -ne 0 ]]; then
+  SUDO="sudo"
+else
+  SUDO=""
+fi
+
+info "Remnawave node installer"
+info "Сейчас вставь свой docker-compose.yml прямо сюда."
+warn "Правило: после окончания вставки нажми Enter и ничего не трогай 2 секунды - скрипт сам продолжит."
+print_line ""
 
 compose_tmp="$(mktemp)"
 : > "$compose_tmp"
 
-while IFS= read -r line; do
-  if [[ "$line" == "__EOF__" ]]; then
-    break
+got_any=0
+idle_hits=0
+idle_needed=2
+idle_timeout=1
+
+while true; do
+  if IFS= read -r -t "$idle_timeout" line; then
+    got_any=1
+    idle_hits=0
+    printf '%s\n' "$line" >> "$compose_tmp"
+  else
+    if [[ $got_any -eq 1 ]]; then
+      idle_hits=$((idle_hits + 1))
+      if [[ $idle_hits -ge $idle_needed ]]; then
+        break
+      fi
+    fi
   fi
-  printf '%s\n' "$line" >> "$compose_tmp"
 done
 
 if [[ ! -s "$compose_tmp" ]]; then
-  echo "Ошибка: docker-compose.yml пустой."
+  err "docker-compose ввод пустой."
   exit 1
 fi
 
@@ -36,9 +107,9 @@ default_service_name="$(
   ' "$compose_tmp" || true
 )"
 
-echo
-echo "Какой сервис в docker-compose.yml нужно пропатчить (добавить volumes с логами)?"
-echo "Если оставить пустым - будет выбран первый сервис из compose."
+print_line ""
+info "Какой сервис в compose нужно пропатчить (добавить volumes с логами)?"
+info "Enter = взять первый сервис из compose."
 read -r -p "Имя сервиса [${default_service_name:-не найдено}]: " service_name
 
 if [[ -z "${service_name}" ]]; then
@@ -46,22 +117,23 @@ if [[ -z "${service_name}" ]]; then
 fi
 
 if [[ -z "${service_name}" ]]; then
-  echo "Ошибка: не удалось определить сервис в compose. Укажите имя сервиса и запустите скрипт заново."
+  err "Не смог определить сервис в compose. Укажи имя сервиса и запусти заново."
   exit 1
 fi
 
-echo
-echo "Выбран сервис: ${service_name}"
-echo "Будет добавлен volume: /var/log/remnanode:/var/log/remnanode (если его нет)."
-echo
+ok "Выбран сервис: ${service_name}"
 
-sudo curl -fsSL https://get.docker.com | sh
+info "Ставлю Docker..."
+$SUDO curl -fsSL https://get.docker.com | sh
 
-sudo mkdir -p /opt/remnanode
-sudo mkdir -p /var/log/remnanode
+info "Готовлю каталоги..."
+$SUDO mkdir -p /opt/remnanode
+$SUDO mkdir -p /var/log/remnanode
 
-sudo cp "$compose_tmp" /opt/remnanode/docker-compose.yml
+info "Пишу /opt/remnanode/docker-compose.yml"
+$SUDO cp "$compose_tmp" /opt/remnanode/docker-compose.yml
 
+info "Добавляю volume /var/log/remnanode:/var/log/remnanode (если его нет)"
 patched_tmp="$(mktemp)"
 
 awk -v target="$service_name" -v mount='- "/var/log/remnanode:/var/log/remnanode"' '
@@ -90,13 +162,11 @@ function maybe_insert_before_leaving_service() {
     next
   }
 
-  # Detect start of a service at indent=2
   if (in_services && line ~ /^[[:space:]]{2}[A-Za-z0-9_.-]+:[[:space:]]*$/) {
     svc=line
     sub(/^[[:space:]]{2}/,"",svc)
     sub(/:[[:space:]]*$/,"",svc)
 
-    # If we are leaving the target service, insert missing block before new service
     if (in_target && svc != target) {
       maybe_insert_before_leaving_service()
       in_target=0
@@ -124,7 +194,6 @@ function maybe_insert_before_leaving_service() {
     if (line ~ /^[[:space:]]{4}volumes:[[:space:]]*$/) {
       has_vol_header=1
       print line
-      # Вставляем сразу после volumes:, если монтирования еще не было в сервисе
       if (!seen_mount && !inserted) {
         print "      " mount
         inserted=1
@@ -132,7 +201,6 @@ function maybe_insert_before_leaving_service() {
       next
     }
 
-    # Если встретили другой верхнеуровневый ключ того же уровня, продолжаем без вставки (вставка будет при выходе)
     print line
     next
   }
@@ -140,19 +208,20 @@ function maybe_insert_before_leaving_service() {
   print line
 }
 END {
-  # EOF: если target сервис был последним - вставляем в конец
   maybe_insert_before_leaving_service()
 }
 ' /opt/remnanode/docker-compose.yml > "$patched_tmp"
 
-sudo mv "$patched_tmp" /opt/remnanode/docker-compose.yml
-sudo chown root:root /opt/remnanode/docker-compose.yml
-sudo chmod 0644 /opt/remnanode/docker-compose.yml
+$SUDO mv "$patched_tmp" /opt/remnanode/docker-compose.yml
+$SUDO chown root:root /opt/remnanode/docker-compose.yml
+$SUDO chmod 0644 /opt/remnanode/docker-compose.yml
 
-sudo apt update -y
-sudo apt install -y logrotate
+info "Ставлю logrotate..."
+$SUDO apt update -y
+$SUDO apt install -y logrotate
 
-sudo tee /etc/logrotate.d/remnanode >/dev/null <<'EOF'
+info "Пишу /etc/logrotate.d/remnanode"
+$SUDO tee /etc/logrotate.d/remnanode >/dev/null <<'EOF'
 /var/log/remnanode/*.log {
   size 50M
   rotate 5
@@ -163,36 +232,34 @@ sudo tee /etc/logrotate.d/remnanode >/dev/null <<'EOF'
 }
 EOF
 
-sudo logrotate -vf /etc/logrotate.d/remnanode || true
+info "Прогоняю logrotate (force, verbose)"
+$SUDO logrotate -vf /etc/logrotate.d/remnanode || true
 
+info "Запускаю remnawave docker compose..."
 cd /opt/remnanode
-sudo docker compose up -d
+$SUDO docker compose up -d
 
-echo
-echo "Показываю логи docker compose (15 секунд), дальше установка продолжится..."
-echo
-if command -v timeout >/dev/null 2>&1; then
-  sudo timeout 15s docker compose logs -f -t || true
+print_line ""
+warn "Покажу логи docker compose 15 секунд (дальше продолжу установку)..."
+if need_cmd timeout; then
+  $SUDO timeout 15s docker compose logs -f -t || true
 else
-  sudo docker compose logs -t --tail 80 || true
+  $SUDO docker compose logs -t --tail 120 || true
 fi
 
+info "Ставлю xray-torrent-blocker..."
 cd /opt
 if [[ -d /opt/xray-torrent-blocker ]]; then
-  echo
-  echo "Каталог /opt/xray-torrent-blocker уже существует, пропускаю git clone."
+  warn "/opt/xray-torrent-blocker уже существует - пропускаю clone."
 else
-  sudo git clone https://github.com/kutovoys/xray-torrent-blocker.git
+  $SUDO git clone https://github.com/kutovoys/xray-torrent-blocker.git
 fi
 
 cd /opt/xray-torrent-blocker
-sudo apt install -y curl iptables jq git expect
+$SUDO apt install -y curl iptables jq git expect
 
-echo
-echo "Запускаю установку xray-torrent-blocker и отвечаю на вопросы установщика..."
-echo
-
-sudo expect <<'EXPECT'
+info "Запускаю install.sh и автоматически отвечаю на вопросы..."
+$SUDO expect <<'EXPECT'
 set timeout -1
 spawn bash install.sh
 expect {
@@ -200,7 +267,6 @@ expect {
     send "/var/log/remnanode/access.log\r"
   }
   timeout {
-    # если промпт не распознан, пробуем просто отправить путь
     send "/var/log/remnanode/access.log\r"
   }
 }
@@ -215,13 +281,11 @@ expect {
 expect eof
 EXPECT
 
-sudo systemctl daemon-reload
-sudo systemctl enable tblocker
-sudo systemctl start tblocker
+info "Включаю и запускаю tblocker..."
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable tblocker
+$SUDO systemctl start tblocker
 
-echo
-echo "Все успешно установлено."
-echo "Логи сервиса tblocker (Ctrl+C для выхода):"
-echo
-
-sudo journalctl -u tblocker -f
+ok "Все успешно."
+warn "Логи tblocker (Ctrl+C чтобы выйти):"
+$SUDO journalctl -u tblocker -f
