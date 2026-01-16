@@ -60,6 +60,8 @@ else
   SUDO=""
 fi
 
+export DEBIAN_FRONTEND=noninteractive
+
 info "Remnawave node installer"
 info "Сейчас вставь свой docker-compose.yml прямо сюда."
 warn "Правило: после окончания вставки нажми Enter и ничего не трогай 2 секунды - скрипт сам продолжит."
@@ -256,33 +258,44 @@ else
 fi
 
 cd /opt/xray-torrent-blocker
-$SUDO apt install -y curl iptables jq git expect
+
+info "Ставлю зависимости (без вопросов apt)..."
+$SUDO apt update -y
+$SUDO apt install -y curl iptables jq git expect conntrack
 
 info "Запускаю install.sh и автоматически отвечаю на вопросы..."
 $SUDO expect <<'EXPECT'
 set timeout -1
 log_user 1
 
-proc send_when_prompted {pattern answer} {
+proc answer {pattern value} {
   expect {
-    -re $pattern { send -- "$answer\r" }
+    -re $pattern { send -- "$value\r" }
     timeout { return }
   }
 }
 
-spawn bash install.sh
+spawn env DEBIAN_FRONTEND=noninteractive bash install.sh
 
-# 1) Путь к логу
-send_when_prompted {(?i)enter.*path.*log|log.*file.*monitor|укаж.*путь.*лог|путь.*лог} "/var/log/remnanode/access.log"
+# Путь к логу
+answer {(?i)enter.*path.*log|log.*file.*monitor|укаж.*путь.*лог|путь.*лог} "/var/log/remnanode/access.log"
 
-# 2) Промежуточный вопрос про создание файла (y/N)
-send_when_prompted {(?i)does not exist.*create.*\?\s*\(y\/n\)|do you want to create it.*\?\s*\(y\/n\)|create it\?\s*\(y\/n\)|создат.*\?\s*\(y\/n\)} "y"
-send_when_prompted {(?i)\(y\/n\)|\(y\/N\)|\(Y\/n\)|\(Y\/N\)} "y"
+# Если вдруг спросит про создание файла
+answer {(?i)does not exist.*create.*\?\s*\(y\/n\)|do you want to create it.*\?\s*\(y\/n\)|создат.*\?\s*\(y\/n\)} "y"
 
-# 3) Выбор пункта меню - "1"
-send_when_prompted {(?i)select|choose|вариант|номер|option|menu} "1"
+# Выбор firewall: "Select firewall (1-2):"
+answer {(?i)select.*firewall.*\(1-2\)|select.*firewall|firewalls:.*1\).*iptables.*2\).*nft} "1"
 
-expect eof
+# Если apt вдруг спросит подтверждение (Y/n)
+while {1} {
+  expect {
+    -re {(?i)do you want to continue\?\s*\[y\/n\]} { send -- "Y\r"; exp_continue }
+    -re {(?i)\(y\/n\)|\[y\/n\]} { send -- "Y\r"; exp_continue }
+    eof { break }
+    timeout { exp_continue }
+  }
+}
+
 EXPECT
 
 info "Включаю и запускаю tblocker..."
