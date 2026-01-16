@@ -10,13 +10,10 @@ c_reset=$'\033[0m'
 c_red=$'\033[31m'
 c_green=$'\033[32m'
 c_yellow=$'\033[33m'
-c_blue=$'\033[34m'
 c_cyan=$'\033[36m'
 c_bold=$'\033[1m'
 
-print_line() {
-  printf '%s\n' "$*"
-}
+print_line() { printf '%s\n' "$*"; }
 
 info() {
   if [[ $USE_COLOR -eq 1 ]]; then
@@ -50,9 +47,7 @@ err() {
   fi
 }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1
-}
+need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 if ! need_cmd sudo; then
   err "sudo не найден. Установи sudo или запускай от root."
@@ -129,6 +124,11 @@ $SUDO curl -fsSL https://get.docker.com | sh
 info "Готовлю каталоги..."
 $SUDO mkdir -p /opt/remnanode
 $SUDO mkdir -p /var/log/remnanode
+
+info "Создаю файлы логов (чтобы сторонние скрипты не спрашивали про создание)..."
+$SUDO touch /var/log/remnanode/access.log
+$SUDO touch /var/log/remnanode/error.log
+$SUDO chmod 0644 /var/log/remnanode/access.log /var/log/remnanode/error.log || true
 
 info "Пишу /opt/remnanode/docker-compose.yml"
 $SUDO cp "$compose_tmp" /opt/remnanode/docker-compose.yml
@@ -261,23 +261,27 @@ $SUDO apt install -y curl iptables jq git expect
 info "Запускаю install.sh и автоматически отвечаю на вопросы..."
 $SUDO expect <<'EXPECT'
 set timeout -1
+log_user 1
+
+proc send_when_prompted {pattern answer} {
+  expect {
+    -re $pattern { send -- "$answer\r" }
+    timeout { return }
+  }
+}
+
 spawn bash install.sh
-expect {
-  -re "(?i)log.*file|path.*log|access\\.log|укаж.*лог|путь.*лог" {
-    send "/var/log/remnanode/access.log\r"
-  }
-  timeout {
-    send "/var/log/remnanode/access.log\r"
-  }
-}
-expect {
-  -re "(?i)select|choose|вариант|номер|option|menu" {
-    send "1\r"
-  }
-  timeout {
-    send "1\r"
-  }
-}
+
+# 1) Путь к логу
+send_when_prompted {(?i)enter.*path.*log|log.*file.*monitor|укаж.*путь.*лог|путь.*лог} "/var/log/remnanode/access.log"
+
+# 2) Промежуточный вопрос про создание файла (y/N)
+send_when_prompted {(?i)does not exist.*create.*\?\s*\(y\/n\)|do you want to create it.*\?\s*\(y\/n\)|create it\?\s*\(y\/n\)|создат.*\?\s*\(y\/n\)} "y"
+send_when_prompted {(?i)\(y\/n\)|\(y\/N\)|\(Y\/n\)|\(Y\/N\)} "y"
+
+# 3) Выбор пункта меню - "1"
+send_when_prompted {(?i)select|choose|вариант|номер|option|menu} "1"
+
 expect eof
 EXPECT
 
